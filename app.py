@@ -19,11 +19,12 @@ import difflib
 import shutil
 import subprocess
 import threading
+import io
+import uuid
+import zipfile
 from pathlib import Path
 
-from pathlib import Path
-
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, send_file
 
 # 可选依赖：只有旧版界面（static/index.html）的 DeepSeek 流程需要。
 # 新版流程（static/v2.html + OpenCode skill）不使用这些包，缺失时不影响启动。
@@ -537,6 +538,81 @@ OPENCODE_CLI = (
 OPENCODE_CLI = str(OPENCODE_CLI).strip()
 if not os.path.exists(OPENCODE_CLI):
     OPENCODE_CLI = "opencode"
+
+# ---- 可用模型自动发现：每次启动识别“真正登录过”的运营商，剔除用不了的（如 alibaba）----
+# opencode auth list 里，credential 型连接 = 用户主动保存过凭据（可靠可用）；
+# env 型连接（如 alibaba 的 DASHSCOPE_API_KEY）多半是残留旧 key，不可靠，不计入“可用”。
+_KNOWN_AUTHED = {"opencode", "deepseek", "volcengine", "volcengine-coding-plan"}  # 检测失败时的兜底
+AUTHED_PROVIDERS = set()   # 已认证（有保存凭据）的 provider
+USABLE_MODELS = []         # 可用模型 [{provider,id,name,free,input_cost}]
+_MODELS_LOCK = threading.Lock()
+
+
+def _authed_providers():
+    authed = set()
+    ok = False
+    try:
+        p = subprocess.run([OPENCODE_CLI, "auth", "list", "--format", "json"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if p.returncode == 0 and p.stdout.strip():
+            ok = True
+            for prov in json.loads(p.stdout):
+                pid = (prov.get("id") or "").strip()
+                if pid and any(c.get("type") == "credential" for c in (prov.get("connections") or [])):
+                    authed.add(pid)
+    except Exception as e:
+        print(f"[models] 读取认证 provider 失败: {e}")
+    return authed if ok else _KNOWN_AUTHED
+
+
+def _fetch_usable_models(authed):
+    items = []
+    try:
+        cmd = [OPENCODE_CLI, "api", "get", f"/api/model?location[directory]={BASE_DIR}"]
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        if p.returncode != 0:
+            raise RuntimeError((p.stdout + p.stderr).strip() or "读取模型列表失败")
+        resp = json.loads(p.stdout) or {}
+        for m in resp.get("data", []):
+            if m.get("status") and m.get("status") != "active":
+                continue
+            provider = (m.get("providerID") or "").strip()
+            mid = (m.get("modelID") or "").strip()
+            if not provider or not mid or provider not in authed:
+                continue
+            if (m.get("capabilities") or {}).get("tools") is False:
+                continue   # 导师流程需要调用工具（写文件/搜索），不支持工具的模型跳过
+            cost = m.get("cost") or []
+            c0 = cost[0] if cost else {}
+            try:
+                ic, oc = float(c0.get("input") or 0), float(c0.get("output") or 0)
+            except Exception:
+                ic = oc = 0.0
+            items.append({"provider": provider, "id": mid,
+                          "name": (m.get("name") or mid).strip(),
+                          "free": ic == 0 and oc == 0, "input_cost": ic})
+    except Exception as e:
+        print(f"[models] 拉取模型列表失败: {e}")
+    return items
+
+
+def _model_sort_key(m):
+    return (not m["free"], m["input_cost"], m["provider"], m["name"].lower())
+
+
+def refresh_models():
+    """重新检测可用 provider 并拉取对应模型，返回 (authed_providers, usable_models)。"""
+    global AUTHED_PROVIDERS, USABLE_MODELS
+    with _MODELS_LOCK:
+        authed = _authed_providers()
+        models = _fetch_usable_models(authed)
+        AUTHED_PROVIDERS = authed
+        USABLE_MODELS = models
+        return authed, models
+
+
+refresh_models()
+
 TUTOR_TITLE_PREFIX = "[知行读书] "
 # 导师模型回退链：按顺序使用，遇到额度/限流错误就自动切到下一个并重试
 # 优先级：config.json 的 "models"（"provider/model" 字符串）> 环境变量 > 内置默认
@@ -554,21 +630,43 @@ if isinstance(_cfg_models, list):
         if _pair[0] and _pair[1] and _pair not in TUTOR_MODEL_CHAIN:
             TUTOR_MODEL_CHAIN.append(_pair)
 for _pair in [
-    (os.getenv("TUTOR_MODEL_PROVIDER", "opencode").strip(), os.getenv("TUTOR_MODEL_ID", "deepseek-v4.1-flash-free").strip()),
-    ("opencode", "minimax-m3.1-flash-free"),
-    ("opencode-go", "minimax-m3.1-flash-free"),
+    (os.getenv("TUTOR_MODEL_PROVIDER", "opencode").strip(), os.getenv("TUTOR_MODEL_ID", "mimo-v2.6-flash-free").strip()),
+    ("opencode", "flint-40b-free"),
+    ("opencode", "beam-free"),
+    ("opencode", "nemotron-3.5-super-vl-free"),
     ("opencode", "deepseek-v4.1-flash-free"),
     ("volcengine-coding-plan", "deepseek-v4-flash"),
     ("volcengine-coding-plan", "doubao-seed-evolving"),
 ]:
     if _pair[0] and _pair[1] and _pair not in TUTOR_MODEL_CHAIN:
         TUTOR_MODEL_CHAIN.append(_pair)
+# 自动补上：把当前“能用了的运营商”里还没进链的模型追加进去（免费优先，再按价格从低到高）
+_seen = set(TUTOR_MODEL_CHAIN)
+for _m in sorted(USABLE_MODELS, key=_model_sort_key):
+    _pair = (_m["provider"], _m["id"])
+    if _pair not in _seen:
+        TUTOR_MODEL_CHAIN.append(_pair)
+        _seen.add(_pair)
+if not TUTOR_MODEL_CHAIN:
+    TUTOR_MODEL_CHAIN.append(("opencode", "mimo-v2.6-flash-free"))
 TUTOR_MODEL_PROVIDER, TUTOR_MODEL_ID = TUTOR_MODEL_CHAIN[0]
 TUTOR_MODEL_STATE = {}          # sid -> {"idx": 下一个候选序号, "tries": 已重试次数}
 QUOTA_ERRORS = ("quota", "free-limit", "free usage limit", "usage limit", "rate limit",
                 "insufficient", "overdue", "not activated", "429", "402")
 # 判断会话状态时只看这几类消息；model-switched / agent-switched 等事件不算一轮对话
 TURN_TYPES = ("user", "assistant", "idle")
+
+
+def _parse_model_string(s):
+    """把 'providerID/modelID' 解析成 (providerID, modelID)；格式不对返回 None。"""
+    s = (s or "").strip()
+    if not s or "/" not in s:
+        return None
+    p, i = s.split("/", 1)
+    p, i = p.strip(), i.strip()
+    if not p or not i or len(p) > 60 or len(i) > 100:
+        return None
+    return (p, i)
 
 
 def oc_request(method, path, body=None):
@@ -775,6 +873,44 @@ def api_tutor_books():
     return jsonify({"ok": True, "items": items})
 
 
+@app.route("/api/models")
+def api_models():
+    """列出可用模型，供问答窗口的下拉框选择。
+
+    只显示真正登录过（有保存凭据）的运营商的模型，免费模型排前面。
+    每次请求都重新检测一次，用户新登录了某个运营商（如 deepseek）后刷新即可看到。
+    """
+    try:
+        _authed, models = refresh_models()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"读取模型列表失败：{e}"}), 500
+    items = [{"provider": m["provider"], "id": m["id"], "name": m["name"], "free": m["free"]}
+             for m in sorted(models, key=_model_sort_key)]
+    # 默认值优先取回退链链首；若链首已不在可用列表里，退到第一个免费模型
+    default = f"{TUTOR_MODEL_PROVIDER}/{TUTOR_MODEL_ID}"
+    if not any(i["provider"] + "/" + i["id"] == default for i in items):
+        first_free = next((i for i in items if i["free"]), items[0] if items else None)
+        default = (first_free["provider"] + "/" + first_free["id"]) if first_free else ""
+    return jsonify({"ok": True, "items": items, "default": default})
+
+
+@app.route("/api/tutor/<sid>/model", methods=["POST"])
+def api_tutor_model(sid):
+    """问答窗口里手动切换当前会话使用的模型。"""
+    data = request.get_json(force=True, silent=True) or {}
+    pair = _parse_model_string(data.get("model"))
+    if not pair:
+        return jsonify({"ok": False, "error": "模型格式应为 providerID/modelID"}), 400
+    prov, mid = pair
+    try:
+        oc_request("post", f"/api/session/{sid}/model", {"model": {"providerID": prov, "id": mid}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"切换模型失败：{e}"}), 500
+    # 手动切换后清掉该会话的自动回退记录，之后额度出问题再从干净状态回退
+    TUTOR_MODEL_STATE.pop(sid, None)
+    return jsonify({"ok": True, "model": f"{prov}/{mid}"})
+
+
 CITATION_TYPE = re.compile(r"\[[A-Z]{1,2}(?:/[A-Z]{1,2})?\]")   # [M] [J] [C] [D] [EB/OL] 等类型标识
 
 
@@ -818,6 +954,9 @@ def api_tutor_start():
         return jsonify({"ok": False, "error": "请填写书名"}), 400
     author = (data.get("author") or "").strip()
     background = (data.get("background") or "").strip()
+    # 允许前端指定模型（"providerID/modelID"），不指定就用回退链首选
+    model_pair = _parse_model_string(data.get("model"))
+    prov, mid = model_pair if model_pair else (TUTOR_MODEL_PROVIDER, TUTOR_MODEL_ID)
 
     # 支持直接粘贴参考文献：自动解析出书名和作者
     title, parsed_author, is_citation = parse_citation(raw_title)
@@ -838,7 +977,7 @@ def api_tutor_start():
         s = oc_request("post", "/api/session", {
             "title": TUTOR_TITLE_PREFIX + title,
             "location": {"directory": str(BASE_DIR)},
-            "model": {"providerID": TUTOR_MODEL_PROVIDER, "id": TUTOR_MODEL_ID},
+            "model": {"providerID": prov, "id": mid},
         })
         sid = s["data"]["id"]
     except Exception as e:
@@ -1045,6 +1184,45 @@ def api_mindmap():
     except Exception:
         tree = None
     return jsonify({"ok": True, "tree": tree if isinstance(tree, dict) else None})
+
+
+def _xmind_topic(node):
+    """把思维导图树节点转成 XMind 的 topic（递归）。"""
+    topic = {
+        "id": "t-" + uuid.uuid4().hex[:12],
+        "class": "topic",
+        "title": (node.get("text") or node.get("title") or "").strip(),
+        "children": {"attached": []},
+    }
+    kids = node.get("children") or []
+    if kids:
+        topic["children"]["attached"] = [_xmind_topic(k) for k in kids]
+    return topic
+
+
+@app.route("/api/mindmap/xmind", methods=["POST"])
+def api_mindmap_xmind():
+    """把前端传来的思维导图树打包成 .xmind（XMind Zen 格式：zip 里放 content/metadata/manifest.json）。"""
+    data = request.get_json(force=True, silent=True) or {}
+    tree = data if isinstance(data, dict) else {}
+    title = (tree.get("title") or "思维导图").strip()
+    root = _xmind_topic({"text": title, "children": tree.get("children") or []})
+    content = [{
+        "id": "sheet-" + uuid.uuid4().hex[:8],
+        "class": "sheet",
+        "title": "Sheet 1",
+        "rootTopic": root,
+    }]
+    metadata = {"creator": {"name": "xmind", "version": "1.0.0"}}
+    manifest = {"file-entries": {"content.json": {}, "metadata.json": {}}}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("content.json", json.dumps(content, ensure_ascii=False).encode("utf-8"))
+        z.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
+        z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False).encode("utf-8"))
+    buf.seek(0)
+    safe = re.sub(r"[^\w\u4e00-\u9fff]+", "-", title).strip("-") or "思维导图"
+    return send_file(buf, as_attachment=True, download_name=f"{safe}.xmind", mimetype="application/octet-stream")
 
 
 @app.route("/api/glossary")

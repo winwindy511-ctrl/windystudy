@@ -125,8 +125,9 @@
   .mk-pop { position: fixed; z-index: 90; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 22px rgba(35,33,29,.18); padding: 8px; display: flex; gap: 6px; align-items: center; }
   .mk-pop input { width: 200px; padding: 7px 10px; margin: 0; }
   .mk-pop button { padding: 7px 12px; }
-  #sel-bubble { position: fixed; z-index: 85; background: var(--brand); color: #fff; border: none; border-radius: 16px; padding: 5px 12px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
-  #sel-bubble:hover { background: var(--brand-ink); }
+  #sel-bubble { position: fixed; z-index: 85; background: var(--brand); border-radius: 14px; padding: 3px; display: flex; gap: 2px; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
+  #sel-bubble button { background: transparent; color: #fff; border: none; border-radius: 10px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
+  #sel-bubble button:hover { background: rgba(255,255,255,.18); }
   .msg.queued .bubble { opacity: .55; border-style: dashed; }
   #mm-modal { position: fixed; inset: 0; z-index: 95; background: rgba(35,33,29,.35); display: flex; align-items: center; justify-content: center; padding: 16px; }
   .mm-box { background: var(--card); width: min(1200px, 96vw); max-height: 92vh; display: flex; flex-direction: column; border-radius: 14px; box-shadow: 0 16px 40px rgba(35,33,29,.25); }
@@ -137,6 +138,8 @@
   .composer-box .mic.rec { background: #c8473d; color: #fff; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(200,71,61,.45); } 100% { box-shadow: 0 0 0 10px rgba(200,71,61,0); } }
   .quick { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .model-sel { margin-left: auto; max-width: 250px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font-size: 13px; font-family: inherit; cursor: pointer; }
+  .model-sel:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(47,111,87,.12); }
 
   /* 回顾 */
   .doc h1 { font-size: 22px; margin: 0 0 8px; }
@@ -445,7 +448,7 @@ async function startBook(){
   $('btn-start').disabled = true;
   busyMask(true);
   try {
-    const data = await api('/api/tutor/start', { method: 'POST', body: JSON.stringify({ title, author, background }) });
+    const data = await api('/api/tutor/start', { method: 'POST', body: JSON.stringify({ title, author, background, model: localStorage.getItem('tutor_model') || '' }) });
     S.sid = data.sid; S.title = data.title;
     S.messages = []; S.busy = true;
     S.status = 'queued'; S.ahead = data.ahead || 0;
@@ -516,7 +519,10 @@ function renderLearn(){
           <div class="mark-rail" id="mark-rail"></div>
         </div>
         <div class="composer">
-          <div class="quick">${QUICK.map(q => `<span class="chip" data-q="${esc(q)}">${esc(q)}</span>`).join('')}</div>
+          <div class="quick">
+            ${QUICK.map(q => `<span class="chip" data-q="${esc(q)}">${esc(q)}</span>`).join('')}
+            <select id="model-sel" class="model-sel" title="当前问答使用的模型，切换后立即生效"></select>
+          </div>
           <div class="composer-box">
             <textarea id="input" placeholder="对梗概提问，或作答自测题…（Enter 发送，Shift+Enter 换行；生成中也可以继续提问，会排队）"></textarea>
             <button class="mic ${REC ? 'rec' : ''}" id="btn-mic">${REC ? '结束录音' : '录音'}</button>
@@ -546,7 +552,50 @@ function renderLearn(){
   };
   th.onmouseup = showMarkBubble;
   renderThread();
+  initModelSelect();
   $('input').focus();
+}
+
+/* ---------- 模型下拉框 ---------- */
+let MODELS_LOADED = [];   // 缓存模型列表，避免每次渲染都请求
+async function initModelSelect(){
+  const sel = $('model-sel');
+  if (!sel) return;
+  const fill = (items, fallback) => {
+    const groups = {};
+    items.forEach(m => { (groups[m.provider] = groups[m.provider] || []).push(m); });
+    const cur = localStorage.getItem('tutor_model') || fallback || '';
+    sel.innerHTML = Object.entries(groups).map(([prov, ms]) =>
+      `<optgroup label="${esc(prov)}">` + ms.map(m =>
+        `<option value="${esc(m.provider)}/${esc(m.id)}"${(m.provider + '/' + m.id) === cur ? ' selected' : ''}>${esc(m.name)}${m.free ? '（免费）' : ''}</option>`
+      ).join('') + '</optgroup>'
+    ).join('');
+    if (sel.selectedIndex < 0 && sel.options.length) sel.selectedIndex = 0;
+  };
+  sel.disabled = true;
+  if (MODELS_LOADED.length) fill(MODELS_LOADED, '');
+  try {
+    const data = await api('/api/models');
+    MODELS_LOADED = data.items || [];
+    fill(MODELS_LOADED, data.default);
+  } catch (e) {
+    if (!MODELS_LOADED.length) sel.innerHTML = '<option value="">模型列表加载失败</option>';
+  }
+  sel.disabled = false;
+  sel.onchange = async () => {
+    localStorage.setItem('tutor_model', sel.value);
+    if (!S.sid) return;
+    sel.disabled = true;
+    try {
+      await api(`/api/tutor/${encodeURIComponent(S.sid)}/model`, { method: 'POST', body: JSON.stringify({ model: sel.value }) });
+      const opt = sel.options[sel.selectedIndex];
+      toast(`已切换模型：${opt ? opt.textContent : sel.value}`);
+    } catch (e) {
+      toast(e.message, 'err');
+    } finally {
+      sel.disabled = false;
+    }
+  };
 }
 
 /* ---------- 梗概选中讲解 ---------- */
@@ -558,13 +607,21 @@ function showSelBubble(){
     const text = sel ? sel.toString().trim() : '';
     if (!text || !sel.rangeCount) return;
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    const b = document.createElement('button');
+    const b = document.createElement('div');
     b.id = 'sel-bubble';
-    b.textContent = '讲解';
-    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 80)) + 'px';
+    b.innerHTML = `<button data-act="explain">讲解</button><button data-act="term">建立词条</button>`;
+    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 170)) + 'px';
     b.style.top = (rect.bottom + 6) + 'px';
     b.onmousedown = e => e.preventDefault();
-    b.onclick = () => askExplain(text);
+    b.onclick = e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const act = btn.dataset.act;
+      hideSelBubble();
+      if (act === 'explain') askExplain(text);
+      else if (act === 'term') requestTerm(text);
+      sel.removeAllRanges();
+    };
     document.body.appendChild(b);
   }, 0);
 }
@@ -896,46 +953,60 @@ function requestMindmap(){
   pumpQueue();
 }
 /* 左右树形导图：SVG 布局，支持任意层级 */
-const MM_COLW = 250, MM_ROWH = 54;
-function mmMeasure(text){
-  const s = String(text || '');
-  const w = Math.min(300, Math.max(64, s.length * 15 + 30));
-  return { w, h: 46 };
+const MM_COLW = 250, MM_MAXW = 208, MM_LH = 18, MM_PADX = 14, MM_PADY = 9, MM_VGAP = 14;
+function _chw(ch){
+  const c = ch.codePointAt(0);
+  if (c > 0x2e80) return 14;            // 中文/全角按 1em
+  if (c <= 0x7f) return 7.7;            // 半角拉丁/数字约 0.55em
+  return 10.5;                          // 其他符号约 0.75em
+}
+function _twidth(s){ let w = 0; for (const ch of String(s || '')) w += _chw(ch); return Math.ceil(w); }
+function mmWrap(text){
+  const s = String(text || ''); const maxw = MM_MAXW - MM_PADX; const lines = []; let cur = '';
+  for (const ch of s){
+    if (_twidth(cur + ch) > maxw && cur){ lines.push(cur); cur = ch; }
+    else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  if (!lines.length) lines.push('');
+  return lines.slice(0, 4);
+}
+function mmLabel(node){
+  let label = node.text || '';
+  if (node.kind === 'question') label = 'Q· ' + label;
+  else if (node.kind === 'point') label = '· ' + label;
+  return label;
+}
+function mmMeasure(node){
+  const lines = mmWrap(mmLabel(node));
+  const w = Math.min(MM_MAXW, Math.max(48, Math.max.apply(null, lines.map(_twidth)) + MM_PADX));
+  const h = lines.length * MM_LH + MM_PADY * 2;
+  return { w, h, lines };
 }
 function mmLayout(tree){
-  const nodes = [];
-  let leafIndex = 0;
+  const root = Object.assign({}, tree, { text: tree.title || S.title });
+  const nodes = []; let nextY = 0;
   function dfs(n, level, parent){
     const id = nodes.length;
-    const m = mmMeasure(n.text);
-    nodes.push({ id, text: n.text || '', kind: n.kind || '', level, parent, w: m.w, h: m.h, children: [] });
+    const m = mmMeasure(n);
+    nodes.push({ id, text: n.text || '', kind: n.kind || '', level, parent, w: m.w, h: m.h, lines: m.lines, children: [], y: 0 });
     if (parent !== null) nodes[parent].children.push(id);
     const kids = Array.isArray(n.children) ? n.children : [];
-    const ys = [];
-    for (const k of kids) ys.push(dfs(k, level + 1, id));
     let y;
-    if (ys.length) y = (ys[0] + ys[ys.length - 1]) / 2;
-    else { y = leafIndex * MM_ROWH; leafIndex++; }
+    if (!kids.length){ y = nextY + m.h / 2; nextY += m.h + MM_VGAP; }
+    else { const ys = kids.map(k => dfs(k, level + 1, id)); y = (ys[0] + ys[ys.length - 1]) / 2; }
     nodes[id].y = y;
     nodes[id].x = level * MM_COLW;
     return y;
   }
-  dfs(tree, 0, null);
+  dfs(root, 0, null);
   const maxLevel = Math.max.apply(null, nodes.map(n => n.level));
-  const width = (maxLevel + 1) * MM_COLW + 60;
-  const height = Math.max(leafIndex * MM_ROWH, 240) + 60;
+  const width = (maxLevel + 1) * MM_COLW + 40;
+  const height = Math.max(nextY - MM_VGAP, 200) + 40;
   return { nodes, width, height };
 }
-function mmTextLines(text, w){
-  const s = String(text || '');
-  const cap = Math.max(3, Math.floor((w - 22) / 15));
-  const lines = [];
-  for (let i = 0; i < s.length; i += cap) lines.push(s.slice(i, i + cap));
-  return lines.slice(0, 3);
-}
 function mmSvg(tree){
-  const root = Object.assign({}, tree, { text: tree.title || S.title });
-  const { nodes, width, height } = mmLayout(root);
+  const { nodes, width, height } = mmLayout(tree);
   const byId = {};
   nodes.forEach(n => byId[n.id] = n);
   let out = '';
@@ -945,24 +1016,23 @@ function mmSvg(tree){
   for (const n of nodes){
     if (n.parent === null) continue;
     const p = byId[n.parent];
-    const x1 = p.x + p.w, y1 = p.y;
-    const x2 = n.x, y2 = n.y;
+    const x1 = p.x + 6 + p.w, y1 = p.y;
+    const x2 = n.x + 6, y2 = n.y;
     const mx = (x1 + x2) / 2;
     out += `<path d="M ${x1} ${y1} H ${mx} V ${y2} H ${x2}" fill="none" stroke="#c9c2b2" stroke-width="1.5"/>`;
   }
   // 节点
   for (const n of nodes){
     let fill = '#fff', stroke = '#e4dccb', color = '#23211d', fs = 14, fw = 400;
-    let label = n.text || '';
     if (n.level === 0) { fill = '#2f6f57'; stroke = '#2f6f57'; color = '#fff'; fs = 16; fw = 700; }
     else if (n.kind === 'module') { fill = '#e3efe8'; stroke = '#cfe0d6'; color = '#1f4d3c'; fs = 14.5; fw = 600; }
-    else if (n.kind === 'question') { fill = '#fdf0d7'; stroke = '#e6c88a'; color = '#8a5f0c'; fs = 13.5; fw = 600; label = 'Q· ' + label; }
-    else if (n.kind === 'point') { fill = '#faf6ec'; stroke = '#eadfca'; color = '#5d5647'; fs = 13; label = '· ' + label; }
+    else if (n.kind === 'question') { fill = '#fdf0d7'; stroke = '#e6c88a'; color = '#8a5f0c'; fs = 13.5; fw = 600; }
+    else if (n.kind === 'point') { fill = '#faf6ec'; stroke = '#eadfca'; color = '#5d5647'; fs = 13; }
     else if (n.kind === 'concept') { fill = '#fff'; stroke = '#e4dccb'; color = '#23211d'; fs = 14; }
     const x = n.x + 6, y = n.y - n.h / 2;
     out += `<rect x="${x}" y="${y}" width="${n.w}" height="${n.h}" rx="10" fill="${fill}" stroke="${stroke}" stroke-width="1.2"/>`;
-    const lines = mmTextLines(label, n.w);
-    const lh = 20;
+    const lines = n.lines;
+    const lh = MM_LH;
     const ty = n.y - ((lines.length - 1) * lh) / 2 + 5;
     out += `<text x="${x + n.w / 2}" y="${ty}" text-anchor="middle" font-size="${fs}" font-weight="${fw}" fill="${color}">`;
     lines.forEach((ln, i) => {
@@ -973,19 +1043,32 @@ function mmSvg(tree){
   out += `</svg>`;
   return out;
 }
-function mmExport(){
+async function mmExportXmind(){
   const data = S.mindmapTree;
   if (!data) return;
-  const svg = mmSvg(data);
-  const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = (data.title || S.title || '思维导图') + '.svg';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 500);
+  try {
+    const res = await fetch('/api/mindmap/xmind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      let msg = `导出失败（HTTP ${res.status}）`;
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (data.title || S.title || '思维导图') + '.xmind';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 500);
+  } catch (e) {
+    toast(e.message, 'err');
+  }
 }
 async function openMindmap(auto){
   let tree = null;
@@ -1006,12 +1089,12 @@ async function openMindmap(auto){
   m.id = 'mm-modal';
   m.innerHTML = `<div class="mm-box">
     <div class="mm-head"><b>${esc(tree.title || S.title)} · 思维导图</b>
-      <div style="display:flex;gap:8px"><button class="btn-soft" id="mm-export">导出 SVG</button><button class="btn-soft" id="mm-close">关闭</button></div>
+      <div style="display:flex;gap:8px"><button class="btn-soft" id="mm-export-xmind">导出 XMind</button><button class="btn-soft" id="mm-close">关闭</button></div>
     </div>
     <div class="mm-tree">${mmSvg(tree)}</div>
   </div>`;
   document.body.appendChild(m);
-  $('mm-export').onclick = mmExport;
+  $('mm-export-xmind').onclick = mmExportXmind;
   $('mm-close').onclick = closeMindmap;
   m.onclick = e => { if (e.target === m) closeMindmap(); };
 }

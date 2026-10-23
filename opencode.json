@@ -1,4 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode/deepseek-v4.1-flash-free"
+  "model": "opencode/deepseek-v4.1-flash-free",
+  "compaction": {
+    "auto": true,
+    "keep": { "tokens": 8000 },
+    "buffer": 150000
+  }
 }

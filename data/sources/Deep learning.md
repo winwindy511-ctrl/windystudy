@@ -66,3 +66,14 @@
 - Goodfellow, Bengio & Courville,《Deep Learning》(2016)：同一学派把本综述扩展为教科书。
 - Lake et al. (2017), "Building Machines That Learn and Think Like People"：主张加入先验、因果与直觉物理。
 - Marcus (2018), "Deep Learning: A Critical Appraisal"：对深度学习的十点批评。
+
+## 补充（问答中收集）
+
+### 循环网络的「参数随时间共享」具体指什么（2026-10-23）
+
+- 展开计算图：循环图按时间复制成 T 份前馈链，各副本的输入权重 U、循环权重 W、输出权重 V 绑定为同一组值；前向为 h_t = tanh(Ux_t + Wh_{t-1} + b)，y_t = Vh_t。
+- BPTT：在展开后的前馈图上做反向传播，再把各时间步对同一参数的梯度相加。
+- 共享的理由不只是省参数：若每个序列长度用一套独立参数，模型无法泛化到未见长度；共享使「同一规则适用于任意位置」，等价于时间平移不变假设，也让每个位置的样本共同训练同一组参数。
+- 代价：梯度是 T 项之和，链式相乘导致消失/爆炸；h_t 依赖 h_{t-1}，训练无法沿时间并行。工程上用截断 BPTT、梯度裁剪缓解；结构上用门控与注意力缓解。
+- 共享只发生在同一层的时间维：堆叠循环网络每层各一套参数，双向网络两个方向各一套。
+- 来源摘要：Pitt CS3750 RNN/LSTM 讲义；arXiv 2304.11461（RNN 与 LSTM 教程）；Springer《RNNs: Architectures, Training Tricks》；Dive into Deep Learning 循环网络章节。

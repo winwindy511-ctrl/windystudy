@@ -1,0 +1,6 @@
+flask>=3.0
+
+# 以下仅旧版界面（static/index.html）的 DeepSeek 流程需要；只跑新界面（static/v2.html）不必安装：
+# openai>=1.30
+# duckduckgo-search>=6.0
+# python-dotenv>=1.0

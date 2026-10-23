@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>知行读书</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --border: #e5e7eb;
+    --text: #111827; --muted: #6b7280; --accent: #2563eb;
+    --done: #10b981; --partial: #f59e0b; --missed: #ef4444; --wrong: #f97316;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10; }
+  .brand { font-size: 18px; font-weight: 700; }
+  nav { display: flex; gap: 6px; }
+  .tab { padding: 8px 18px; border: 1px solid var(--border); background: #fff; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { max-width: 860px; margin: 0 auto; padding: 20px; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  h2 { margin: 0 0 12px; font-size: 18px; }
+  h3 { margin: 0 0 8px; font-size: 15px; }
+  input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; font-family: inherit; margin-bottom: 10px; }
+  textarea { min-height: 90px; resize: vertical; }
+  button { cursor: pointer; font-size: 14px; border: none; border-radius: 8px; padding: 10px 16px; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .primary { background: var(--accent); color: #fff; }
+  .ghost { background: #eef2ff; color: var(--accent); }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .error { color: var(--missed); background: #fef2f2; border: 1px solid #fecaca; padding: 10px 12px; border-radius: 8px; font-size: 14px; margin: 8px 0; }
+  .hidden { display: none !important; }
+  .row { display: flex; gap: 8px; align-items: flex-end; }
+  .row input { flex: 1; margin-bottom: 0; }
+
+  /* markdown */
+  .md h1 { font-size: 20px; } .md h2 { font-size: 17px; margin: 14px 0 6px; } .md h3 { font-size: 15px; margin: 12px 0 4px; }
+  .md p { margin: 6px 0; line-height: 1.7; }
+  .md ul { margin: 6px 0; padding-left: 22px; }
+  .md li { margin: 3px 0; line-height: 1.6; }
+  .md blockquote { border-left: 3px solid var(--border); margin: 8px 0; padding: 2px 12px; color: var(--muted); }
+
+  /* 阶段 */
+  .stage-bar { display: flex; gap: 8px; margin-bottom: 16px; font-size: 13px; color: var(--muted); }
+  .stage { padding: 4px 10px; border-radius: 20px; background: #eef0f3; }
+  .stage.active { background: var(--accent); color: #fff; }
+
+  /* 问答 */
+  .qa-item { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+  .qa-q { font-weight: 600; margin-bottom: 6px; }
+  .qa-q::before { content: "问 · "; color: var(--accent); }
+  .qa-a .md::before { content: "答："; }
+
+  /* 反馈卡片 */
+  .fc-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 3px rgba(0,0,0,.07); }
+  .fc-head { font-weight: 700; margin-bottom: 4px; font-size: 15px; }
+  .fc-verdict { color: var(--muted); font-size: 13px; font-style: italic; margin-bottom: 10px; }
+  .fc-items { display: flex; flex-direction: column; gap: 6px; }
+  .fc-item { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+  .fc-item .ic { flex-shrink: 0; }
+  .fc-item.done { background: #ecfdf5; border-left: 3px solid var(--done); }
+  .fc-item.partial { background: #fffbeb; border-left: 3px solid var(--partial); }
+  .fc-item.missed { background: #fef2f2; border-left: 3px solid var(--missed); }
+  .fc-item.wrong { background: #fff7ed; border-left: 3px solid var(--wrong); }
+  .fc-tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; color: #fff; flex-shrink: 0; margin-top: 1px; }
+  .fc-tag.done { background: var(--done); } .fc-tag.partial { background: var(--partial); }
+  .fc-tag.missed { background: var(--missed); } .fc-tag.wrong { background: var(--wrong); }
+
+  /* 回顾列表 */
+  .book-card { display: flex; justify-content: space-between; align-items: center; border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s; background: #fff; }
+  .book-card:hover { border-color: var(--accent); }
+  .book-title { font-weight: 600; }
+  .book-meta { font-size: 13px; color: var(--muted); margin-top: 3px; }
+
+  /* loading */
+  #loading-mask { position: fixed; inset: 0; background: rgba(255,255,255,.82); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; }
+  .spinner { width: 34px; height: 34px; border: 3px solid #e5e7eb; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  #loading-text { margin-top: 14px; color: var(--muted); font-size: 14px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">📖 知行读书</div>
+  <nav>
+    <button id="tab-learn" class="tab active">学习</button>
+    <button id="tab-review" class="tab">回顾</button>
+  </nav>
+</header>
+
+<main>
+  <!-- 学习视图 -->
+  <section id="view-learn">
+    <div id="start-panel" class="panel">
+      <h2>读一本书</h2>
+      <input id="f-title" placeholder="书名（必填）" />
+      <input id="f-author" placeholder="作者（可选）" />
+      <input id="f-background" placeholder="学习目标 / 背景（可选，如：考研论述、零基础入门）" />
+      <button id="btn-start" class="primary">开始学习</button>
+      <div id="config-hint" class="hint"></div>
+    </div>
+
+    <div id="study-area" class="hidden">
+      <div id="stage-bar" class="stage-bar"></div>
+      <div id="overview-panel" class="panel hidden"></div>
+      <div id="qa-panel" class="panel hidden"></div>
+      <div id="quiz-panel" class="panel hidden"></div>
+      <div id="summary-panel" class="panel hidden"></div>
+    </div>
+  </section>
+
+  <!-- 回顾视图 -->
+  <section id="view-review" class="hidden">
+    <div class="panel">
+      <h2>我的卡片</h2>
+      <div id="review-list"></div>
+    </div>
+    <div id="review-detail" class="hidden"></div>
+  </section>
+</main>
+
+<div id="loading-mask" class="hidden"><div class="spinner"></div><div id="loading-text">处理中…</div></div>
+
+<script>
+const state = { view: 'learn', sid: null, session: null, questions: [], qIndex: 0 };
+
+/* ---------- 工具 ---------- */
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function $(id){ return document.getElementById(id); }
+function show(id){ $(id).classList.remove('hidden'); }
+function hide(id){ $(id).classList.add('hidden'); }
+function setLoading(on, text){
+  if(on){ $('loading-text').textContent = text || '处理中…'; show('loading-mask'); }
+  else hide('loading-mask');
+}
+
+function renderMarkdown(md){
+  if(!md) return '';
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/`(.+?)`/g, '<code>$1</code>');
+  const lines = md.split('\n');
+  let html = '', inList = false;
+  for(const line of lines){
+    const t = line.trim();
+    if(!t){ if(inList){ html += '</ul>'; inList = false; } continue; }
+    let m;
+    if((m = t.match(/^(#{1,4})\s+(.*)$/))){
+      if(inList){ html += '</ul>'; inList = false; }
+      const lv = m[1].length; html += `<h${lv}>${inline(m[2])}</h${lv}>`;
+    } else if((m = t.match(/^[-*]\s+(.*)$/))){
+      if(!inList){ html += '<ul>'; inList = true; }
+      html += `<li>${inline(m[1])}</li>`;
+    } else if((m = t.match(/^>\s?(.*)$/))){
+      if(inList){ html += '</ul>'; inList = false; }
+      html += `<blockquote>${inline(m[1])}</blockquote>`;
+    } else {
+      if(inList){ html += '</ul>'; inList = false; }
+      html += `<p>${inline(t)}</p>`;
+    }
+  }
+  if(inList) html += '</ul>';
+  return html;
+}
+
+async function api(path, opts){
+  const res = await fetch(path, Object.assign({}, opts, { headers: Object.assign({'Content-Type':'application/json'}, (opts||{}).headers||{}) }));
+  const data = await res.json();
+  if(!data.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+function showError(el, msg){ const d = document.createElement('div'); d.className='error'; d.textContent = msg; el.appendChild(d); }
+
+/* ---------- 阶段指示 ---------- */
+const STAGES = [['overview','① 梗概'],['qa','② 问答'],['quiz','③ 自测'],['done','✓ 完成']];
+function renderStage(stage){
+  const bar = $('stage-bar');
+  bar.innerHTML = STAGES.map(([k,name]) => `<span class="stage ${k===stage?'active':''}">${name}</span>`).join('');
+}
+
+/* ---------- 反馈卡片渲染 ---------- */
+const STATUS = {
+  done:    {icon:'✅', tag:'掌握', tagCls:'done',    cls:'done'},
+  partial: {icon:'🟡', tag:'缺一点', tagCls:'partial', cls:'partial'},
+  missed:  {icon:'❌', tag:'未答到', tagCls:'missed',  cls:'missed'},
+  wrong:   {icon:'⚠️', tag:'答错', tagCls:'wrong',   cls:'wrong'},
+};
+function renderCard(card){
+  const items = (card.entries||[]).map(e => {
+    const s = STATUS[e.status] || {icon:'•', tag:'', tagCls:'', cls:''};
+    return `<div class="fc-item ${s.cls}"><span class="ic">${s.icon}</span><span class="fc-tag ${s.tagCls}">${s.tag}</span><span>${esc(e.text)}</span></div>`;
+  }).join('');
+  return `<div class="fc-card">
+    <div class="fc-head">第${card.qid}题 · ${esc(card.title||'')}</div>
+    ${card.verdict ? `<div class="fc-verdict">${esc(card.verdict)}</div>` : ''}
+    <div class="fc-items">${items}</div>
+  </div>`;
+}
+function renderCards(cards){
+  if(!cards || !cards.length) return '<p class="hint">还没有反馈卡片。</p>';
+  return cards.map(renderCard).join('');
+}
+
+/* ---------- 学习流程 ---------- */
+async function startStudy(){
+  const title = $('f-title').value.trim();
+  if(!title){ alert('请填写书名'); return; }
+  const author = $('f-author').value.trim();
+  const background = $('f-background').value.trim();
+  $('btn-start').disabled = true;
+  setLoading(true, '正在联网核对 + 生成梗概（约 20~40 秒）…');
+  try{
+    const data = await api('/api/study', { method:'POST', body: JSON.stringify({title, author, background}) });
+    state.sid = data.session.id; state.session = data.session;
+    hide('start-panel'); show('study-area');
+    renderOverview();
+  }catch(e){
+    $('btn-start').disabled = false;
+    alert(e.message);
+  }finally{
+    setLoading(false);
+  }
+}
+
+function renderOverview(){
+  const s = state.session;
+  renderStage(s.stage);
+  const p = $('overview-panel');
+  p.innerHTML = `<h3>📄 结构化梗概</h3><div class="md">${renderMarkdown(s.overview)}</div>`;
+  show('overview-panel');
+
+  // 问答区
+  const q = $('qa-panel');
+  const qaItems = (s.qa||[]).map(x => `<div class="qa-item"><div class="qa-q">${esc(x.q)}</div><div class="qa-a md">${renderMarkdown(x.a)}</div></div>`).join('');
+  q.innerHTML = `<h3>💬 问答</h3><div id="qa-list">${qaItems}</div>
+    <div class="row"><input id="qa-input" placeholder="对梗概里不懂的点提问…" /><button id="qa-send" class="ghost">提问</button></div>
+    <div style="margin-top:12px"><button id="btn-quiz" class="primary">开始自测 →</button></div>`;
+  show('qa-panel');
+  $('qa-send').onclick = sendQuestion;
+  $('qa-input').onkeydown = e => { if(e.key==='Enter') sendQuestion(); };
+  $('btn-quiz').onclick = startQuiz;
+}
+
+async function sendQuestion(){
+  const input = $('qa-input');
+  const q = input.value.trim();
+  if(!q) return;
+  $('qa-send').disabled = true;
+  setLoading(true, '回答中…');
+  try{
+    const data = await api(`/api/study/${state.sid}/ask`, { method:'POST', body: JSON.stringify({question:q}) });
+    state.session.qa.push({q, a:data.answer, ts:''});
+    input.value = '';
+    renderOverview();
+  }catch(e){ alert(e.message); }
+  finally{ setLoading(false); }
+}
+
+async function startQuiz(){
+  $('btn-quiz').disabled = true;
+  setLoading(true, '正在出题（约 10~20 秒）…');
+  try{
+    const data = await api(`/api/study/${state.sid}/quiz`, { method:'POST' });
+    state.questions = data.questions; state.qIndex = 0;
+    state.session.stage = 'quiz';
+    renderStage('quiz');
+    renderQuestion();
+  }catch(e){ alert(e.message); }
+  finally{ setLoading(false); }
+}
+
+function renderQuestion(){
+  const q = state.questions[state.qIndex];
+  const p = $('quiz-panel');
+  p.innerHTML = `<h3>🎯 自测 · ${state.qIndex+1} / ${state.questions.length}</h3>
+    <p style="font-weight:600;font-size:15px">${esc(q.title)}</p>
+    <p style="line-height:1.7">${esc(q.question)}</p>
+    <textarea id="quiz-answer" placeholder="用自己的话作答（允许模糊、不完整）…"></textarea>
+    <button id="btn-submit" class="primary">提交回答</button>
+    <div id="card-area"></div>
+    <div id="next-area"></div>`;
+  show('quiz-panel');
+  $('btn-submit').onclick = submitAnswer;
+}
+
+async function submitAnswer(){
+  const ans = $('quiz-answer').value.trim();
+  if(!ans){ alert('请先写下你的回答'); return; }
+  $('btn-submit').disabled = true;
+  setLoading(true, '正在批改…');
+  try{
+    const data = await api(`/api/study/${state.sid}/answer`, { method:'POST', body: JSON.stringify({answer:ans}) });
+    state.session.quiz_cards.push(data.card);
+    // 显示这张卡片
+    $('card-area').innerHTML = renderCard(data.card);
+    state.qIndex = data.next_index;
+    if(data.finished){
+      state.session.stage = 'done';
+      state.session.summary = data.summary;
+      renderStage('done');
+      $('summary-panel').innerHTML = `<h3>🏁 总结</h3><div class="md">${renderMarkdown(data.summary)}</div>
+        <button id="btn-to-review" class="ghost" style="margin-top:10px">去回顾页看全部卡片 →</button>`;
+      show('summary-panel');
+      $('btn-to-review').onclick = goReview;
+      $('next-area').innerHTML = '';
+    } else {
+      $('next-area').innerHTML = `<button id="btn-next" class="primary" style="margin-top:8px">下一题 →</button>`;
+      $('btn-next').onclick = renderQuestion;
+    }
+  }catch(e){ alert(e.message); }
+  finally{ setLoading(false); }
+}
+
+/* ---------- 回顾 ---------- */
+async function loadReviews(){
+  const data = await api('/api/studies');
+  const list = $('review-list');
+  if(!data.items || !data.items.length){ list.innerHTML = '<p class="hint">还没有学习记录。先去「学习」页读一本书吧。</p>'; return; }
+  list.innerHTML = data.items.map(it => `
+    <div class="book-card" data-sid="${esc(it.id)}">
+      <div><div class="book-title">${esc(it.title)}</div>
+        <div class="book-meta">${esc(it.author||'佚名')} · ${esc(it.created_at)} · ${esc(stageName(it.stage))}</div></div>
+      <div style="color:var(--muted)">›</div>
+    </div>`).join('');
+  list.querySelectorAll('.book-card').forEach(el => el.onclick = () => openReview(el.dataset.sid));
+}
+function stageName(st){ return ({overview:'梗概', qa:'问答中', quiz:'自测中', done:'已完成'})[st] || st; }
+
+async function openReview(sid){
+  setLoading(true, '加载中…');
+  try{
+    const data = await api(`/api/study/${sid}`);
+    const s = data.session;
+    const d = $('review-detail');
+    $('review-list').parentElement.classList.add('hidden'); // 隐藏列表
+    const nCards = (s.quiz_cards||[]).length;
+    let missedCount = 0;
+    (s.quiz_cards||[]).forEach(c => (c.entries||[]).forEach(e => { if(e.status!=='done') missedCount++; }));
+    d.innerHTML = `
+      <div class="panel">
+        <button id="btn-back" class="ghost">← 返回列表</button>
+        <h2 style="margin-top:10px">${esc(s.title)}</h2>
+        <div class="hint">${esc(s.author||'')} · ${esc(s.created_at)} · ${nCards} 张卡片</div>
+      </div>
+      <div class="panel"><h3>📄 梗概</h3><div class="md">${renderMarkdown(s.overview)}</div></div>
+      <div class="panel"><h3>🎴 反馈卡片（${nCards} 张）</h3><div id="review-cards">${renderCards(s.quiz_cards)}</div></div>
+      ${s.summary ? `<div class="panel"><h3>🏁 总结</h3><div class="md">${renderMarkdown(s.summary)}</div></div>` : ''}
+      <div class="hint" style="text-align:center;margin-bottom:20px">卡片已保存在本地，随时可回来看。</div>`;
+    show('review-detail');
+    $('btn-back').onclick = () => { hide('review-detail'); $('review-list').parentElement.classList.remove('hidden'); };
+    window.scrollTo(0,0);
+  }catch(e){ alert(e.message); }
+  finally{ setLoading(false); }
+}
+
+/* ---------- Tab 切换 ---------- */
+function setTab(v){
+  state.view = v;
+  $('tab-learn').classList.toggle('active', v==='learn');
+  $('tab-review').classList.toggle('active', v==='review');
+  if(v==='learn'){ show('view-learn'); hide('view-review'); }
+  else { hide('view-learn'); show('view-review'); loadReviews(); }
+}
+function goReview(){ setTab('review'); }
+
+/* ---------- 初始化 ---------- */
+(async function init(){
+  $('tab-learn').onclick = () => setTab('learn');
+  $('tab-review').onclick = () => setTab('review');
+  $('btn-start').onclick = startStudy;
+  try{
+    const cfg = await api('/api/config');
+    if(!cfg.has_key) $('config-hint').innerHTML = '⚠️ 尚未配置 DeepSeek Key：请复制 .env.example 为 .env 并填入 DEEPSEEK_API_KEY，然后重启 app.py';
+  }catch(e){ $('config-hint').textContent = '⚠️ 无法连接后端，请确认已运行 python app.py'; }
+})();
+</script>
+</body>
+</html>

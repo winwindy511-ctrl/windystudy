@@ -1,0 +1,25 @@
+# 密钥与本地配置（绝不能提交）
+.env
+.env.local
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行时状态
+data/tutor_queue.json
+data/_backup/
+# 个人问答痕迹（思维导图含追问原文；查漏表含自测错题；以下三本含自测反馈记录）
+data/mindmap/
+reviews/查漏表-*
+reviews/中国文化要义.md
+reviews/6G技术发展及演进.md
+reviews/论坚持全面深化改革.md
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

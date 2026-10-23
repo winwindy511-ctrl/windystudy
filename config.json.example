@@ -1,0 +1,10 @@
+{
+  "$schema-comment": "可选配置：复制本文件为 config.json 后修改；不创建也能运行（用内置默认值）",
+  "models": [
+    "opencode/deepseek-v4.1-flash-free",
+    "opencode/minimax-m3.1-flash-free",
+    "volcengine-coding-plan/deepseek-v4-flash"
+  ],
+  "port": 5000,
+  "cli": ""
+}

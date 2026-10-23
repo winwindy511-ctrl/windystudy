@@ -15,6 +15,7 @@ import re
 import time
 import inspect
 import asyncio
+import difflib
 import shutil
 import subprocess
 import threading
@@ -989,21 +990,35 @@ def api_tutor_delete(sid):
 OVERVIEW_CUT = re.compile(r"^#{1,4}\s*(附[：:]|主干自测|自测记录|反馈卡片|问答记录|总结评估)", re.M)
 
 
-def find_review_file(title):
-    """按书名找梗概文件；文件名由导师生成，可能与书名略有出入，因此做宽松匹配。"""
-    for p in (REVIEWS_DIR / f"{title}.md", REVIEWS_DIR / f"{_safe_name(title)}.md"):
+def _find_fuzzy(directory, title, suffix):
+    """在 directory 里按书名找 <名><suffix>：先精确，再模糊（容忍大小写与拼写小差异）。"""
+    directory = Path(directory)
+    for p in (directory / f"{title}{suffix}", directory / f"{_safe_name(title)}{suffix}"):
         if p.is_file():
             return p
     key = _safe_name(title).replace("-", "").lower()
-    best = None
-    for p in REVIEWS_DIR.glob("*.md"):
-        if p.stem.startswith("查漏表"):
-            continue
+    if not key:
+        return None
+    best, best_score = None, 0.0
+    for p in directory.glob(f"*{suffix}"):
         stem = _safe_name(p.stem).replace("-", "").lower()
-        if stem and key and (stem in key or key in stem):
-            if best is None or p.stat().st_mtime > best.stat().st_mtime:
-                best = p
-    return best
+        if not stem:
+            continue
+        if stem in key or key in stem:
+            score = 1.0
+        else:
+            score = difflib.SequenceMatcher(None, stem, key).ratio()
+        if score > best_score:
+            best, best_score = p, score
+    return best if best_score >= 0.8 else None
+
+
+def find_review_file(title):
+    """按书名找梗概文件；文件名由导师生成（大小写/拼写可能与输入略有出入），做宽松匹配。"""
+    p = _find_fuzzy(REVIEWS_DIR, title, ".md")
+    if p and p.stem.startswith("查漏表"):
+        return None
+    return p
 
 
 @app.route("/api/overview")
@@ -1022,7 +1037,7 @@ def api_overview():
 @app.route("/api/mindmap")
 def api_mindmap():
     title = (request.args.get("title") or "").strip()
-    p = DATA_DIR / "mindmap" / f"{_safe_name(title)}.json" if title else None
+    p = _find_fuzzy(DATA_DIR / "mindmap", title, ".json") if title else None
     if not p or not p.is_file():
         return jsonify({"ok": True, "tree": None})
     try:
@@ -1035,7 +1050,7 @@ def api_mindmap():
 @app.route("/api/glossary")
 def api_glossary():
     title = (request.args.get("title") or "").strip()
-    p = DATA_DIR / "glossary" / f"{_safe_name(title)}.json" if title else None
+    p = _find_fuzzy(DATA_DIR / "glossary", title, ".json") if title else None
     if not p or not p.is_file():
         return jsonify({"ok": True, "items": []})
     try:

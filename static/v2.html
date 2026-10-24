@@ -167,6 +167,12 @@
   .tp-sec b { display: block; font-size: 12px; color: var(--brand); letter-spacing: 1px; margin-bottom: 2px; }
   .doc strong { color: #000; }
 
+  /* 回顾 · 主题多卡片 */
+  .rv-card { margin-bottom: 18px; }
+  .rv-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 10px; margin-bottom: 12px; border-bottom: 1px dashed var(--line); }
+  .rv-card-head b { font-size: 15px; color: var(--brand-ink); }
+  .rv-card textarea { min-height: 52vh; font-family: Consolas, "Microsoft YaHei", monospace; font-size: 13.5px; line-height: 1.75; }
+
   /* 提示 */
   #loading { position: fixed; inset: 0; background: rgba(244,241,234,.75); display: none; align-items: center; justify-content: center; z-index: 50; }
   #loading.show { display: flex; }
@@ -222,7 +228,7 @@ const S = {
   messages: [], busy: false,
   books: [], reviews: [],
   pollTimer: null,
-  reviewName: null, reviewRaw: '',
+  reviewName: null, reviewParts: {},
   glossary: {},
   status: '', ahead: 0, draft: '',
   overview: '', ovCollapsed: false, ovTop: 0,
@@ -368,12 +374,12 @@ function renderSide(){
       el.querySelector('.del').onclick = e => { e.stopPropagation(); deleteBook(el.dataset.sid, el.dataset.title); };
     });
   } else {
-    $('side-label').textContent = '学习回顾（reviews/）';
+    $('side-label').textContent = '学习回顾（按主题）';
     if (!S.reviews.length) { list.innerHTML = '<div class="item-m" style="padding:10px 12px">还没有回顾文件</div>'; return; }
     list.innerHTML = S.reviews.map(r => `
       <div class="item ${r.name === S.reviewName ? 'active' : ''}" data-name="${esc(r.name)}">
-        <div class="item-t">${esc(r.name.replace(/\.md$/, ''))}</div>
-        <div class="item-m">${esc(fmtTime(r.mtime * 1000))}</div>
+        <div class="item-t">${esc(r.name)}</div>
+        <div class="item-m">${esc(r.files.map(f => f.kind === 'checklist' ? '查漏表' : '梗概').join(' · '))} · ${esc(fmtTime(r.mtime * 1000))}</div>
         <button class="del" title="删除">×</button>
       </div>`).join('');
     list.querySelectorAll('.item').forEach(el => {
@@ -1193,10 +1199,13 @@ function renderReviewPlaceholder(){
 }
 async function openReview(name){
   try {
-    const data = await api(`/api/reviews/${encodeURIComponent(name)}`);
-    await loadGlossary(name.replace(/\.md$/, '').replace(/^查漏表-/, ''));
+    const item = S.reviews.find(r => r.name === name);
+    if (!item) throw new Error('主题不存在');
+    const results = await Promise.all(item.files.map(f => api(`/api/reviews/${encodeURIComponent(f.name)}`)));
     S.reviewName = name;
-    S.reviewRaw = data.content;
+    S.reviewParts = {};
+    item.files.forEach((f, i) => S.reviewParts[f.kind] = { name: f.name, content: results[i].content });
+    await loadGlossary(name);
     renderSide();
     renderReview(false);
   } catch (e) {
@@ -1204,52 +1213,70 @@ async function openReview(name){
   }
 }
 
+const RV_LABELS = { main: '梗概 / 总结', checklist: '查漏表' };
+
 function renderReview(editing){
-  const title = S.reviewName.replace(/\.md$/, '');
-  const actions = editing
-    ? `<button class="btn-soft" id="rv-cancel">取消</button><button class="btn-primary" id="rv-save">保存</button>`
-    : `<button class="btn-soft" id="rv-edit">编辑</button>`;
+  const kinds = ['main', 'checklist'].filter(k => S.reviewParts[k]);
+  const cards = kinds.map(kind => {
+    const p = S.reviewParts[kind];
+    const isEditing = editing === kind;
+    const body = isEditing
+      ? `<textarea id="rv-text-${kind}">${esc(p.content)}</textarea>`
+      : `<div class="doc">${md(p.content)}</div>`;
+    return `<div class="card rv-card">
+      <div class="rv-card-head"><b>${RV_LABELS[kind] || kind}</b>
+        ${isEditing
+          ? `<div><button class="btn-soft" id="rv-cancel-${kind}">取消</button><button class="btn-primary" id="rv-save-${kind}">保存</button></div>`
+          : `<button class="btn-soft" id="rv-edit-${kind}">编辑</button>`}
+      </div>
+      ${body}
+    </div>`;
+  }).join('');
   $('main').innerHTML = `
     <div class="head">
       <div class="eyebrow">Review</div>
       <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap">
-        <h2>${esc(title)}</h2>
-        <div class="actions" style="margin-top:0">${actions}<button class="btn-danger" id="rv-del">删除</button></div>
+        <h2>${esc(S.reviewName)}</h2>
+        <div class="actions" style="margin-top:0"><button class="btn-danger" id="rv-del">删除主题</button></div>
       </div>
     </div>
-    ${editing
-      ? `<div class="card rv-edit"><textarea id="rv-text">${esc(S.reviewRaw)}</textarea></div>`
-      : `<div class="card doc">${md(S.reviewRaw)}</div>`}`;
+    ${cards}`;
   $('rv-del').onclick = () => deleteReview(S.reviewName);
-  if (editing) {
-    $('rv-cancel').onclick = () => renderReview(false);
-    $('rv-save').onclick = saveReview;
-    $('rv-text').focus();
-  } else {
-    $('rv-edit').onclick = () => renderReview(true);
-  }
+  kinds.forEach(kind => {
+    const editBtn = $('rv-edit-' + kind);
+    if (editBtn) editBtn.onclick = () => renderReview(kind);
+    const cancelBtn = $('rv-cancel-' + kind);
+    if (cancelBtn) cancelBtn.onclick = () => renderReview(false);
+    const saveBtn = $('rv-save-' + kind);
+    if (saveBtn) saveBtn.onclick = () => saveReview(kind);
+    const ta = $('rv-text-' + kind);
+    if (ta) ta.focus();
+  });
 }
 
-async function saveReview(){
-  const content = $('rv-text').value;
-  $('rv-save').disabled = true;
+async function saveReview(kind){
+  const p = S.reviewParts[kind];
+  const content = $('rv-text-' + kind).value;
+  const btn = $('rv-save-' + kind);
+  if (btn) btn.disabled = true;
   try {
-    await api(`/api/reviews/${encodeURIComponent(S.reviewName)}`, { method: 'PUT', body: JSON.stringify({ content }) });
-    S.reviewRaw = content;
+    await api(`/api/reviews/${encodeURIComponent(p.name)}`, { method: 'PUT', body: JSON.stringify({ content }) });
+    p.content = content;
     toast('已保存');
     renderReview(false);
   } catch (e) {
     toast(e.message, 'err');
-    $('rv-save').disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
 async function deleteReview(name){
-  if (!confirm(`删除回顾文件「${name.replace(/\.md$/, '')}」？删除后无法恢复。`)) return;
+  const files = (S.reviews.find(r => r.name === name) || {}).files || [];
+  if (!confirm(`删除主题「${name}」及其 ${files.length} 个回顾文件？删除后无法恢复。`)) return;
   try {
-    await api(`/api/reviews/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    for (const f of files) await api(`/api/reviews/${encodeURIComponent(f.name)}`, { method: 'DELETE' });
     S.reviews = S.reviews.filter(r => r.name !== name);
-    if (S.reviewName === name) { S.reviewName = null; S.reviewRaw = ''; renderReviewPlaceholder(); }
+    if (S.reviewName === name) { S.reviewName = null; S.reviewParts = {}; renderReviewPlaceholder(); }
     renderSide();
     toast('已删除');
   } catch (e) {

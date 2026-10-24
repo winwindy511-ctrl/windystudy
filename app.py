@@ -1024,8 +1024,19 @@ def api_tutor_send(sid):
 
 @app.route("/api/reviews")
 def api_reviews():
-    files = sorted(REVIEWS_DIR.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return jsonify({"ok": True, "items": [{"name": p.name, "mtime": p.stat().st_mtime} for p in files]})
+    """回顾列表：按「主题（书）」分组返回。一个主题 = 梗概/总结文件 + 可选的查漏表文件。"""
+    topics = {}
+    for p in REVIEWS_DIR.glob("*.md"):
+        stem = p.stem
+        if stem.startswith("查漏表-"):
+            topic, kind = stem[len("查漏表-"):], "checklist"
+        else:
+            topic, kind = stem, "main"
+        t = topics.setdefault(topic, {"name": topic, "mtime": 0.0, "files": []})
+        t["files"].append({"name": p.name, "kind": kind, "mtime": p.stat().st_mtime})
+        t["mtime"] = max(t["mtime"], p.stat().st_mtime)
+    items = sorted(topics.values(), key=lambda t: t["mtime"], reverse=True)
+    return jsonify({"ok": True, "items": items})
 
 
 @app.route("/api/reviews/<name>", methods=["GET", "PUT", "DELETE"])

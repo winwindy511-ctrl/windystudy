@@ -228,7 +228,7 @@ const S = {
   messages: [], busy: false,
   books: [], reviews: [],
   pollTimer: null,
-  reviewName: null, reviewParts: {},
+  reviewName: null, reviewSections: [], reviewMainName: null,
   glossary: {},
   status: '', ahead: 0, draft: '',
   overview: '', ovCollapsed: false, ovTop: 0,
@@ -615,8 +615,8 @@ function showSelBubble(){
     const rect = sel.getRangeAt(0).getBoundingClientRect();
     const b = document.createElement('div');
     b.id = 'sel-bubble';
-    b.innerHTML = `<button data-act="explain">讲解</button><button data-act="term">建立词条</button>`;
-    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 170)) + 'px';
+    b.innerHTML = `<button data-act="explain">讲解</button><button data-act="term">建立词条</button><button data-act="note">记笔记</button>`;
+    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 260)) + 'px';
     b.style.top = (rect.bottom + 6) + 'px';
     b.onmousedown = e => e.preventDefault();
     b.onclick = e => {
@@ -626,6 +626,7 @@ function showSelBubble(){
       hideSelBubble();
       if (act === 'explain') askExplain(text);
       else if (act === 'term') requestTerm(text);
+      else if (act === 'note') addNote(text);
       sel.removeAllRanges();
     };
     document.body.appendChild(b);
@@ -819,8 +820,8 @@ function showMarkBubble(){
     const rect = sel.getRangeAt(0).getBoundingClientRect();
     const b = document.createElement('div');
     b.id = 'mark-bubble';
-    b.innerHTML = `<button data-act="mark">标记</button><button data-act="copy">复制</button><button data-act="term">建立词条</button>`;
-    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 240)) + 'px';
+    b.innerHTML = `<button data-act="mark">标记</button><button data-act="copy">复制</button><button data-act="term">建立词条</button><button data-act="note">记笔记</button>`;
+    b.style.left = Math.max(12, Math.min(rect.left, innerWidth - 320)) + 'px';
     b.style.top = (rect.bottom + 6) + 'px';
     b.onmousedown = e => e.preventDefault();
     b.onclick = e => {
@@ -831,6 +832,7 @@ function showMarkBubble(){
       if (act === 'mark') openMarkPop(rect, msgEl.dataset.mid, text);
       else if (act === 'copy') appendToInput(text);
       else if (act === 'term') requestTerm(text);
+      else if (act === 'note') addNote(text);
       sel.removeAllRanges();
     };
     document.body.appendChild(b);
@@ -882,6 +884,18 @@ function requestTerm(quote){
   S.glossaryDirty = true;
   renderThread();
   pumpQueue();
+}
+
+/* 记笔记：把选中文字追加到该书梗概文件的「我的笔记」区块（回顾里会显示为独立卡片） */
+async function addNote(text){
+  if (!S.title) { toast('还没有正在学习的书', 'err'); return; }
+  if (!text) return;
+  try {
+    const data = await api('/api/reviews/notes', { method: 'POST', body: JSON.stringify({ title: S.title, text }) });
+    toast('已记入笔记');
+  } catch (e) {
+    toast(e.message, 'err');
+  }
 }
 
 /* 右侧进度条：细线表示当前可见范围，小圆点是标记 */
@@ -1197,14 +1211,49 @@ function renderReviewPlaceholder(){
     <div class="sub">这里读取导师写入 <code>reviews/</code> 的梗概、卡片和查漏表。</div></div>
     <div class="card hint">请在左侧选择一份回顾文件。</div>`;
 }
+
+/* 把一个 <书名>.md 文件按区块拆成多个 section：
+   main 梗概总结 / 自测记录 / 自测总结 / 我的笔记 */
+function splitReview(content){
+  const MARK = { '## 自测记录': '自测反馈', '## 自测总结': '自测总结', '## 我的笔记': '我的笔记' };
+  const found = Object.keys(MARK).map(k => ({ k, i: content.indexOf(k) })).filter(m => m.i >= 0).sort((a, b) => a.i - b.i);
+  if (!found.length) return [{ key: 'main', title: '梗概 / 总结', content }];
+  const sections = [{ key: 'main', title: '梗概 / 总结', content: content.slice(0, found[0].i) }];
+  for (let i = 0; i < found.length; i++){
+    const end = i + 1 < found.length ? found[i + 1].i : content.length;
+    const seg = content.slice(found[i].i, end);
+    if (seg.trim()) sections.push({ key: found[i].k, title: MARK[found[i].k], content: seg });
+  }
+  return sections;
+}
+
+/* 把同一文件的 sections 按顺序重建回完整内容（main 在前，其余按标题标记） */
+function rebuildReview(sections){
+  const main = sections.find(s => s.key === 'main');
+  const others = sections.filter(s => s.key !== 'main');
+  const parts = [main ? main.content.trimEnd() : ''];
+  for (const s of others) parts.push(s.content.trimEnd());
+  let out = parts.join('\n\n') + '\n';
+  if (!main && !others.length) out = '';
+  return out;
+}
+
 async function openReview(name){
   try {
     const item = S.reviews.find(r => r.name === name);
     if (!item) throw new Error('主题不存在');
     const results = await Promise.all(item.files.map(f => api(`/api/reviews/${encodeURIComponent(f.name)}`)));
     S.reviewName = name;
-    S.reviewParts = {};
-    item.files.forEach((f, i) => S.reviewParts[f.kind] = { name: f.name, content: results[i].content });
+    S.reviewSections = [];
+    item.files.forEach((f, i) => {
+      const content = results[i].content;
+      if (f.kind === 'checklist') {
+        S.reviewSections.push({ key: 'checklist', title: '查漏表', file: f.name, content });
+      } else {
+        S.reviewMainName = f.name;
+        splitReview(content).forEach(sec => S.reviewSections.push(Object.assign(sec, { file: f.name })));
+      }
+    });
     await loadGlossary(name);
     renderSide();
     renderReview(false);
@@ -1213,21 +1262,17 @@ async function openReview(name){
   }
 }
 
-const RV_LABELS = { main: '梗概 / 总结', checklist: '查漏表' };
-
 function renderReview(editing){
-  const kinds = ['main', 'checklist'].filter(k => S.reviewParts[k]);
-  const cards = kinds.map(kind => {
-    const p = S.reviewParts[kind];
-    const isEditing = editing === kind;
+  const cards = S.reviewSections.map((s, i) => {
+    const isEditing = editing === i;
     const body = isEditing
-      ? `<textarea id="rv-text-${kind}">${esc(p.content)}</textarea>`
-      : `<div class="doc">${md(p.content)}</div>`;
+      ? `<textarea id="rv-text-${i}">${esc(s.content)}</textarea>`
+      : `<div class="doc">${md(s.content)}</div>`;
     return `<div class="card rv-card">
-      <div class="rv-card-head"><b>${RV_LABELS[kind] || kind}</b>
+      <div class="rv-card-head"><b>${esc(s.title)}</b>
         ${isEditing
-          ? `<div><button class="btn-soft" id="rv-cancel-${kind}">取消</button><button class="btn-primary" id="rv-save-${kind}">保存</button></div>`
-          : `<button class="btn-soft" id="rv-edit-${kind}">编辑</button>`}
+          ? `<div><button class="btn-soft" id="rv-cancel-${i}">取消</button><button class="btn-primary" id="rv-save-${i}">保存</button></div>`
+          : `<button class="btn-soft" id="rv-edit-${i}">编辑</button>`}
       </div>
       ${body}
     </div>`;
@@ -1242,26 +1287,27 @@ function renderReview(editing){
     </div>
     ${cards}`;
   $('rv-del').onclick = () => deleteReview(S.reviewName);
-  kinds.forEach(kind => {
-    const editBtn = $('rv-edit-' + kind);
-    if (editBtn) editBtn.onclick = () => renderReview(kind);
-    const cancelBtn = $('rv-cancel-' + kind);
+  S.reviewSections.forEach((s, i) => {
+    const editBtn = $('rv-edit-' + i);
+    if (editBtn) editBtn.onclick = () => renderReview(i);
+    const cancelBtn = $('rv-cancel-' + i);
     if (cancelBtn) cancelBtn.onclick = () => renderReview(false);
-    const saveBtn = $('rv-save-' + kind);
-    if (saveBtn) saveBtn.onclick = () => saveReview(kind);
-    const ta = $('rv-text-' + kind);
+    const saveBtn = $('rv-save-' + i);
+    if (saveBtn) saveBtn.onclick = () => saveReview(i);
+    const ta = $('rv-text-' + i);
     if (ta) ta.focus();
   });
 }
 
-async function saveReview(kind){
-  const p = S.reviewParts[kind];
-  const content = $('rv-text-' + kind).value;
-  const btn = $('rv-save-' + kind);
+async function saveReview(i){
+  const sec = S.reviewSections[i];
+  sec.content = $('rv-text-' + i).value;
+  const btn = $('rv-save-' + i);
   if (btn) btn.disabled = true;
   try {
-    await api(`/api/reviews/${encodeURIComponent(p.name)}`, { method: 'PUT', body: JSON.stringify({ content }) });
-    p.content = content;
+    const sameFile = S.reviewSections.filter(s => s.file === sec.file);
+    const full = sec.key === 'checklist' ? sec.content : rebuildReview(sameFile);
+    await api(`/api/reviews/${encodeURIComponent(sec.file)}`, { method: 'PUT', body: JSON.stringify({ content: full }) });
     toast('已保存');
     renderReview(false);
   } catch (e) {
@@ -1276,7 +1322,7 @@ async function deleteReview(name){
   try {
     for (const f of files) await api(`/api/reviews/${encodeURIComponent(f.name)}`, { method: 'DELETE' });
     S.reviews = S.reviews.filter(r => r.name !== name);
-    if (S.reviewName === name) { S.reviewName = null; S.reviewParts = {}; renderReviewPlaceholder(); }
+    if (S.reviewName === name) { S.reviewName = null; S.reviewSections = []; renderReviewPlaceholder(); }
     renderSide();
     toast('已删除');
   } catch (e) {

@@ -1057,6 +1057,30 @@ def api_review_file(name):
     return jsonify({"ok": True, "name": p.name, "content": p.read_text(encoding="utf-8")})
 
 
+@app.route("/api/reviews/notes", methods=["POST"])
+def api_review_notes():
+    """把选中文字追加进该书的梗概文件「## 我的笔记」区块（没有则创建）。"""
+    data = request.get_json(force=True, silent=True) or {}
+    title = (data.get("title") or "").strip()
+    text = (data.get("text") or "").strip()
+    if not title or not text:
+        return jsonify({"ok": False, "error": "缺少书名或笔记内容"}), 400
+    p = find_review_file(title)
+    if not p:
+        return jsonify({"ok": False, "error": "找不到该书的梗概文件，请先建书"}), 404
+    content = p.read_text(encoding="utf-8")
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    note_line = f"- **{stamp}** · {text}"
+    if "## 我的笔记" in content:
+        idx = content.index("## 我的笔记")
+        tail = content[idx:].rstrip()
+        content = content[:idx] + tail + "\n" + note_line + "\n"
+    else:
+        content = content.rstrip() + "\n\n## 我的笔记\n\n" + note_line + "\n"
+    p.write_text(content, encoding="utf-8")
+    return jsonify({"ok": True, "name": p.name, "content": content})
+
+
 @app.route("/api/health")
 def api_health():
     """一键自检：OpenCode 连接、技能、默认模型、搜索提供方、队列状态。"""

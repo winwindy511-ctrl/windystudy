@@ -685,15 +685,23 @@ def oc_request(method, path, body=None):
 def tutor_view(raw_messages):
     """只保留用户消息和导师的文字回复，隐藏 skill 加载、工具调用等过程信息。
 
-    同时丢掉「发出去但因额度/限流失败、没有任何回复」的用户消息，避免回退重试后
-    同一个问题在界面上出现两次。
+    设计要点（修复：模型故障时不再丢失用户的问题）：
+    - 用户消息一律保留。若一轮以失败告终（额度/限流、模型不可用等）且没有导师回复，
+      给该条用户消息打上 failed 标记，前端据此显示「未收到回复」，而不是删除它。
+    - 若回退重发后又出现一条相同文本的用户消息，用新的替换旧的（避免重复显示两条）。
     """
     out = []
     pending_idx = None      # out 中「还没有回复的用户消息」的下标
     for m in raw_messages:
         t = m.get("type")
         if t == "user":
-            out.append({"id": m.get("id"), "role": "user", "text": m.get("text", "")})
+            text = m.get("text", "")
+            # 回退重发会产生一条相同文本的新用户消息：替换旧的，避免重复
+            if out and out[-1].get("role") == "user" and out[-1].get("text") == text:
+                out[-1]["id"] = m.get("id")
+                out[-1].pop("failed", None)
+            else:
+                out.append({"id": m.get("id"), "role": "user", "text": text})
             pending_idx = len(out) - 1
         elif t == "assistant":
             text = "".join(p.get("text", "") for p in m.get("content", []) if p.get("type") == "text")
@@ -701,10 +709,13 @@ def tutor_view(raw_messages):
                 out.append({"id": m.get("id"), "role": "assistant", "text": text})
                 pending_idx = None
         elif t == "idle":
-            # 这一轮以失败告终且没有任何导师回复 -> 该用户消息视为失败尝试，移除
-            if pending_idx is not None and m.get("outcome") not in (None, "succeeded"):
-                out.pop(pending_idx)
-                pending_idx = None
+            if pending_idx is not None and out[pending_idx].get("role") == "user":
+                ok = m.get("outcome") in (None, "succeeded")
+                if ok:
+                    out[pending_idx].pop("failed", None)
+                else:
+                    out[pending_idx]["failed"] = True
+            pending_idx = None
     return out
 
 
@@ -713,8 +724,15 @@ def _is_quota_error(err_text):
     return any(k in t for k in QUOTA_ERRORS)
 
 
+def _is_retryable_error(err_text):
+    """模型暂时不可用 / 路由错误等也应换模型重发（问题本身没问题）。"""
+    t = (err_text or "").lower()
+    return any(k in t for k in ("no-route", "model unavailable", "model not found", "route",
+                                "connection", "timeout", "timed out", "network", "503", "500"))
+
+
 def _tutor_recover(sid, msgs=None):
-    """会话因额度/限流失败时：换下一个候选模型并重发最后一条问题。返回是否已重发。"""
+    """会话因额度/限流或模型不可用失败时：换下一个候选模型并重发最后一条问题。返回是否已重发。"""
     st = TUTOR_MODEL_STATE.setdefault(sid, {"idx": 0, "tries": 0})
     if msgs is None:
         raw = oc_request("get", f"/api/session/{sid}/message?order=desc&limit=6") or {}
@@ -728,7 +746,7 @@ def _tutor_recover(sid, msgs=None):
         st["failed"] = []   # 恢复后清空失败记录，等额度恢复后还能回到首选模型
         return False
     err = str(turns[0].get("error", ""))
-    if not _is_quota_error(err):
+    if not (_is_quota_error(err) or _is_retryable_error(err)):
         return False
     if st["tries"] >= len(TUTOR_MODEL_CHAIN):
         st["tries"] = 0

@@ -80,6 +80,8 @@
   .msg.user { align-self: flex-end; }
   .bubble { padding: 12px 16px; border-radius: 14px; font-size: 14.5px; }
   .msg.user .bubble { background: var(--brand); color: #fff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+  .msg.user.failed .bubble { background: #8c2f28; }
+  .msg.user.failed .retry-hint { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,255,255,.4); font-size: 12px; color: #ffe4dd; }
   .msg.bot .bubble { background: #fff; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
   .msg .who { font-size: 12px; color: var(--mute); margin: 0 4px 3px; }
   .msg.user .who { text-align: right; }
@@ -662,7 +664,7 @@ function renderThread(){
   if (!t) return;
   const items = S.messages.map(m => {
     return m.role === 'user'
-      ? `<div class="msg user" data-mid="${esc(m.id)}"><div class="who">你</div><div class="bubble">${esc(m.text)}</div></div>`
+      ? `<div class="msg user ${m.failed ? 'failed' : ''}" data-mid="${esc(m.id)}"><div class="who">你${m.failed ? ' · 未收到回复' : ''}</div><div class="bubble">${esc(m.text)}${m.failed ? '<div class="retry-hint">模型暂时不可用，这条问题没有收到回复。可以重新发送，或切换模型后重试。</div>' : ''}</div></div>`
       : `<div class="msg bot" data-mid="${esc(m.id)}"><div class="who">导师</div><div class="bubble doc">${md(m.text)}</div></div>`;
   }).join('');
   let tip = '';

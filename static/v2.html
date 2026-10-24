@@ -238,6 +238,7 @@ const S = {
   mindmapTree: null,
   stickBottom: false, threadTop: 0, threadNear: true,
   marks: [],
+  sessionModel: '',
 };
 const QUICK = ['进入自测', '结束并总结'];
 
@@ -482,6 +483,7 @@ async function openBook(sid, title){
   S.threadTop = 0; S.threadNear = true;
   S.marks = loadMarks(sid);
   S.ovTop = 0;
+  S.sessionModel = '';
   busyMask(true);
   try {
     await loadGlossary(title);
@@ -501,6 +503,7 @@ async function loadMessages(){
   S.messages = data.messages || [];
   S.busy = !!data.busy;
   S.status = data.status || ''; S.ahead = data.ahead || 0;
+  S.sessionModel = data.model || '';
 }
 
 /* ---------- 学习页 ---------- */
@@ -572,7 +575,8 @@ async function initModelSelect(){
   const fill = (items, fallback) => {
     const groups = {};
     items.forEach(m => { (groups[m.provider] = groups[m.provider] || []).push(m); });
-    const cur = localStorage.getItem('tutor_model') || fallback || '';
+    // 优先显示会话实际使用的模型；没有则用上次手动选择的；再没有用后端默认
+    const cur = S.sessionModel || localStorage.getItem('tutor_model') || fallback || '';
     sel.innerHTML = Object.entries(groups).map(([prov, ms]) =>
       `<optgroup label="${esc(prov)}">` + ms.map(m =>
         `<option value="${esc(m.provider)}/${esc(m.id)}"${(m.provider + '/' + m.id) === cur ? ' selected' : ''}>${esc(m.name)}${m.free ? '（免费）' : ''}</option>`
@@ -592,6 +596,7 @@ async function initModelSelect(){
   sel.disabled = false;
   sel.onchange = async () => {
     localStorage.setItem('tutor_model', sel.value);
+    S.sessionModel = sel.value;
     if (!S.sid) return;
     sel.disabled = true;
     try {
@@ -604,6 +609,19 @@ async function initModelSelect(){
       sel.disabled = false;
     }
   };
+}
+
+/* 会话模型变化（自动回退/手动切换）后，让下拉框跟着显示真实模型 */
+function syncModelSelect(){
+  const sel = $('model-sel');
+  if (!sel || !S.sessionModel) return;
+  for (let i = 0; i < sel.options.length; i++) {
+    if (sel.options[i].value === S.sessionModel) {
+      if (sel.selectedIndex !== i) sel.selectedIndex = i;
+      return;
+    }
+  }
+  // 会话用的模型不在下拉列表里（可能不可用）：什么都不做，保持现状
 }
 
 /* ---------- 梗概选中讲解 ---------- */
@@ -1178,6 +1196,8 @@ async function pollOnce(){
     S.messages = data.messages || [];
     S.busy = !!data.busy;
     S.status = data.status || ''; S.ahead = data.ahead || 0;
+    S.sessionModel = data.model || '';
+    if (S.sessionModel) syncModelSelect();
     if (!Object.keys(S.glossary).length) await loadGlossary(S.title);
     if (!S.overview) {
       await loadOverview(S.title);

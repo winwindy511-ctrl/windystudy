@@ -725,15 +725,29 @@ def _is_quota_error(err_text):
 
 
 def _is_retryable_error(err_text):
-    """模型暂时不可用 / 路由错误等也应换模型重发（问题本身没问题）。"""
+    """模型暂时不可用 / 路由 / 区域限制 / 认证失败等 provider 层面错误，都值得换模型重发。
+
+    provider.auth（如「This model is not available in your country」）、provider.overloaded、
+    provider.timeout 等都属于「这个模型/运营商当前用不了」，换下一个候选模型是正确的处理。
+    只有真正的内容问题（模型已正常回复但内容不合规）才不应重发。
+    """
     t = (err_text or "").lower()
+    if "provider." in t:
+        return True
     return any(k in t for k in ("no-route", "model unavailable", "model not found", "route",
-                                "connection", "timeout", "timed out", "network", "503", "500"))
+                                "connection", "timeout", "timed out", "network", "503", "500",
+                                "not available", "unavailable", "country", "region"))
 
 
 def _tutor_recover(sid, msgs=None):
-    """会话因额度/限流或模型不可用失败时：换下一个候选模型并重发最后一条问题。返回是否已重发。"""
+    """会话因额度/限流或模型不可用失败时：换下一个候选模型并重发最后一条问题。返回是否已重发。
+
+    若整条回退链都试过仍失败，进入冷却（give_up_until），避免每次轮询都把整条链
+    重新扫一遍、反复重发同一个问题。
+    """
     st = TUTOR_MODEL_STATE.setdefault(sid, {"idx": 0, "tries": 0})
+    if time.time() < st.get("give_up_until", 0):
+        return False
     if msgs is None:
         raw = oc_request("get", f"/api/session/{sid}/message?order=desc&limit=6") or {}
         msgs = raw.get("data", [])
@@ -744,12 +758,14 @@ def _tutor_recover(sid, msgs=None):
     if turns[0].get("outcome") == "succeeded":
         st["tries"] = 0
         st["failed"] = []   # 恢复后清空失败记录，等额度恢复后还能回到首选模型
+        st["give_up_until"] = 0
         return False
     err = str(turns[0].get("error", ""))
     if not (_is_quota_error(err) or _is_retryable_error(err)):
         return False
     if st["tries"] >= len(TUTOR_MODEL_CHAIN):
         st["tries"] = 0
+        st["give_up_until"] = time.time() + 60   # 整条链都试过了，冷却一分钟再重试
         return False
     last_user = next((m for m in msgs if m.get("type") == "user"), None)
     if not last_user or not (last_user.get("text") or "").strip():
@@ -763,24 +779,46 @@ def _tutor_recover(sid, msgs=None):
             break
     if failed_now:
         st.setdefault("failed", []).append(failed_now)
-    # 在链上挑一个没用过/没失败过的模型
+    # 在链上挑候选模型。
+    # 关键：从「刚失败的模型在链中的位置之后」开始挑，而不是永远从链首挑。
+    # 否则会话一旦失败，会从链首(免费模型)重新开始，把用户手动选好的模型（如 ark coding plan）拉回免费链。
+    free_pairs = {(m["provider"], m["id"]) for m in USABLE_MODELS if m.get("free")}
     used = set(st.get("failed", []))
+    skip_free = _is_quota_error(err)
+    # 当前失败模型在链中的位置；找不到就从头开始
+    start = 0
+    if failed_now and failed_now in TUTOR_MODEL_CHAIN:
+        start = TUTOR_MODEL_CHAIN.index(failed_now) + 1
     choice = None
-    for cand in TUTOR_MODEL_CHAIN:
-        if cand not in used:
-            choice = cand
-            break
+    n = len(TUTOR_MODEL_CHAIN)
+    for k in range(n):
+        cand = TUTOR_MODEL_CHAIN[(start + k) % n]
+        if cand in used:
+            continue
+        if skip_free and cand in free_pairs:
+            continue
+        choice = cand
+        break
+    if not choice and skip_free:
+        # 没有非免费候选时退回原逻辑（允许免费模型）
+        for k in range(n):
+            cand = TUTOR_MODEL_CHAIN[(start + k) % n]
+            if cand not in used:
+                choice = cand
+                break
     if not choice:
         st["tries"] = 0
         st["failed"] = []
+        st["give_up_until"] = time.time() + 60
         return False
     prov, mod = choice
     st["idx"] = TUTOR_MODEL_CHAIN.index(choice)
     st["tries"] += 1
+    st["give_up_until"] = 0
     try:
         oc_request("post", f"/api/session/{sid}/model", {"model": {"providerID": prov, "id": mod}})
         oc_request("post", f"/api/session/{sid}/prompt", {"text": last_user["text"]})
-        print(f"[tutor] 会话 {sid} 额度受限，已切换到 {prov}/{mod} 并重发问题")
+        print(f"[tutor] 会话 {sid} 当前模型不可用，已切换到 {prov}/{mod} 并重发问题")
         return True
     except Exception as e:
         print(f"[tutor] 会话 {sid} 切换模型失败: {e}")
@@ -1024,7 +1062,16 @@ def api_tutor_messages(sid):
     # 取最近一轮对话的状态（忽略 model-switched 这类事件消息）
     newest_turn = next((m for m in newest_first if m.get("type") in TURN_TYPES), None)
     busy = status in ("queued", "running") or (newest_turn is not None and newest_turn.get("type") != "idle")
-    return jsonify({"ok": True, "messages": tutor_view(raw), "busy": busy, "status": status, "ahead": ahead})
+    # 会话当前实际使用的模型（打开书时前端用它来对齐模型下拉框）
+    cur_model = ""
+    try:
+        sinfo = oc_request("get", f"/api/session/{sid}") or {}
+        sm = (sinfo.get("data") or {}).get("model") or {}
+        if sm.get("providerID") and sm.get("id"):
+            cur_model = f"{sm['providerID']}/{sm['id']}"
+    except Exception:
+        pass
+    return jsonify({"ok": True, "messages": tutor_view(raw), "busy": busy, "status": status, "ahead": ahead, "model": cur_model})
 
 
 @app.route("/api/tutor/<sid>/send", methods=["POST"])

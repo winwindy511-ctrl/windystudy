@@ -739,6 +739,76 @@ def _is_retryable_error(err_text):
                                 "not available", "unavailable", "country", "region"))
 
 
+def _session_turns(sid, limit=10):
+    """取会话最近的对话轮次消息（倒序）。失败返回空列表。"""
+    try:
+        raw = oc_request("get", f"/api/session/{sid}/message?order=desc&limit={limit}") or {}
+    except Exception:
+        return []
+    return [m for m in (raw.get("data") or []) if m.get("type") in TURN_TYPES]
+
+
+def _session_hung_tool(sid, limit=6):
+    """最新几轮里是否挂着 running 状态的工具调用（question 这类等待答复的调用会永远 running）。"""
+    try:
+        raw = oc_request("get", f"/api/session/{sid}/message?order=desc&limit={limit}") or {}
+    except Exception:
+        return False
+    for m in (raw.get("data") or []):
+        if m.get("type") != "assistant":
+            continue
+        for part in m.get("content") or []:
+            if isinstance(part, dict) and part.get("type") == "tool" \
+                    and (part.get("state") or {}).get("status") == "running":
+                return True
+    return False
+
+
+def _session_idle(sid):
+    """会话是否空闲：还没有对话轮次，或最新轮次是 idle 事件。"""
+    turns = _session_turns(sid)
+    return (not turns) or turns[0].get("type") == "idle"
+
+
+def _ensure_idle(sid, timeout=45):
+    """等会话回到空闲；若发现有挂死的工具调用（running 超过 20 秒）就中断它。"""
+    deadline = time.time() + timeout
+    hung_since = None
+    while time.time() < deadline:
+        if _session_idle(sid):
+            return True
+        if _session_hung_tool(sid):
+            if hung_since is None:
+                hung_since = time.time()
+            elif time.time() - hung_since > 20:
+                try:
+                    oc_request("post", f"/api/session/{sid}/interrupt")
+                except Exception:
+                    pass
+                hung_since = None
+        time.sleep(2)
+    return _session_idle(sid)
+
+
+def _prompt_until_delivered(sid, text, tries=3):
+    """发送 prompt 并核实它真的写入了会话（OpenCode 在会话忙时会静默吞掉 prompt）。
+    没查到就等空闲后重发。返回是否确认送达。"""
+    want = text.strip()
+    for _ in range(tries):
+        try:
+            oc_request("post", f"/api/session/{sid}/prompt", {"text": text})
+        except Exception:
+            pass
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            for m in _session_turns(sid, limit=10):
+                if m.get("type") == "user" and (m.get("text") or "").strip() == want:
+                    return True
+            time.sleep(2)
+        _ensure_idle(sid, timeout=15)
+    return False
+
+
 def _tutor_recover(sid, msgs=None):
     """会话因额度/限流或模型不可用失败时：换下一个候选模型并重发最后一条问题。返回是否已重发。
 
@@ -883,7 +953,11 @@ def _tutor_tick():
             _tutor_save()
             try:
                 oc_request("post", f"/api/experimental/session/{cur['sid']}/skill", {"id": "book-tutor"})
-                oc_request("post", f"/api/session/{cur['sid']}/prompt", {"text": cur["prompt"]})
+                # 技能注入可能触发一次"无书名"的空跑并挂死在提问工具上，先等它结束/掐掉，
+                # 再发建书提示词，并核实提示词真的入账（OpenCode 会静默吞掉忙时的 prompt）。
+                _ensure_idle(cur["sid"], timeout=45)
+                if not _prompt_until_delivered(cur["sid"], cur["prompt"]):
+                    raise RuntimeError("建书提示词未能送达会话")
             except Exception:
                 _tutor_finish(False)
             return
@@ -893,6 +967,15 @@ def _tutor_tick():
         msgs = raw.get("data", [])
         turns = [m for m in msgs if m.get("type") in TURN_TYPES]
         if not turns or turns[0].get("type") != "idle":
+            # 看门狗：assistant 轮次的工具调用挂起超过 6 分钟（如 question 等待答复），
+            # 说明这一轮已经卡死，中断它让会话落回 idle，交给下面的重试逻辑续跑。
+            if turns and turns[0].get("type") == "assistant" and _session_hung_tool(cur["sid"]):
+                created = ((turns[0].get("time") or {}).get("created") or 0) / 1000.0
+                if created and time.time() - created > 360:
+                    try:
+                        oc_request("post", f"/api/session/{cur['sid']}/interrupt")
+                    except Exception:
+                        pass
             return
         if any(p.stat().st_mtime >= cur["started_at"] for p in REVIEWS_DIR.glob("*.md")):
             _tutor_finish(True)
@@ -900,7 +983,8 @@ def _tutor_tick():
             cur["retries"] += 1
             _tutor_save()
             if not _tutor_recover(cur["sid"]):
-                oc_request("post", f"/api/session/{cur['sid']}/prompt", {"text": TUTOR_CONTINUE_PROMPT})
+                oc_request("post", f"/api/session/{cur['sid']}/prompt",
+                           {"text": TUTOR_CONTINUE_PROMPT + "\n（书目：《" + cur["title"] + "》）"})
         else:
             _tutor_finish(False)
 
